@@ -1,0 +1,18 @@
+[package]
+name = "cloudflare-tunnel-manager"
+version = "0.1.0"
+edition = "2021"
+description = "Desktop GUI to manage local Cloudflare Tunnel (cloudflared) service and configuration on Windows"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+dirs = "5"
+anyhow = "1"
+chrono = "0.4"
+
+[profile.release]
+opt-level = 2
+lto = true
