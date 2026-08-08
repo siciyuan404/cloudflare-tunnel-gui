@@ -36,7 +36,7 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build (release)
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Show output
         run: dir target\release\*.exe
