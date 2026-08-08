@@ -1,12 +1,25 @@
 use crate::cloudflared::{self, CmdResult};
 use crate::config::TunnelConfig;
 use crate::tasks::{Done, Runner};
+use crate::updater;
 use chrono::Local;
 use eframe::egui;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+
+/// Live state of the silent updater, shown in the sidebar.
+#[derive(Clone, Debug)]
+enum UpdateState {
+    Checking,
+    Current,
+    Available(updater::ReleaseInfo),
+    Downloading,
+    Restarting,
+    Error(String),
+}
 
 struct LogLine {
     time: String,
@@ -48,11 +61,25 @@ pub struct ManagerApp {
     ingress_hostname: String,
     ingress_service: String,
 
+    // Silenced self-update (GitHub Releases).
+    update: Arc<Mutex<UpdateState>>,
+    close_requested: Arc<AtomicBool>,
+
     tab: Tab,
 }
 
 fn now() -> String {
     Local::now().format("%H:%M:%S").to_string()
+}
+
+fn fmt_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 impl Default for ManagerApp {
@@ -81,10 +108,56 @@ impl ManagerApp {
             create_name: String::new(),
             ingress_hostname: String::new(),
             ingress_service: "http://localhost:8080".into(),
+            update: Arc::new(Mutex::new(UpdateState::Checking)),
+            close_requested: Arc::new(AtomicBool::new(false)),
             tab: Tab::Status,
         };
+        app.start_background_update_check();
         app.refresh_all();
         app
+    }
+
+    /// Kick off a background check against GitHub Releases for a newer version.
+    fn start_background_update_check(&self) {
+        let update = self.update.clone();
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        std::thread::spawn(move || {
+            *update.lock().unwrap() = match updater::fetch_latest() {
+                Ok(info) => match updater::is_outdated(&current, &info.version) {
+                    Ok(true) => UpdateState::Available(info),
+                    Ok(false) => UpdateState::Current,
+                    Err(e) => UpdateState::Error(e.to_string()),
+                },
+                Err(e) => UpdateState::Error(e.to_string()),
+            };
+        });
+    }
+
+    /// Download the newer release, stage it beside the exe, then relaunch.
+    fn apply_update(&self) {
+        let info = match &*self.update.lock().unwrap() {
+            UpdateState::Available(i) => i.clone(),
+            _ => return,
+        };
+        let update = self.update.clone();
+        let close = self.close_requested.clone();
+        std::thread::spawn(move || {
+            *update.lock().unwrap() = UpdateState::Downloading;
+            let result = (|| -> anyhow::Result<()> {
+                let staged = updater::staged_path()?;
+                let exe = std::env::current_exe()?;
+                updater::download(&info.asset_url, &staged)?;
+                updater::install_and_restart(&exe, &staged)?;
+                Ok(())
+            })();
+            match result {
+                Ok(()) => {
+                    *update.lock().unwrap() = UpdateState::Restarting;
+                    close.store(true, Ordering::Relaxed);
+                }
+                Err(e) => *update.lock().unwrap() = UpdateState::Error(e.to_string()),
+            }
+        });
     }
 
     fn log(&mut self, tag: &str, text: &str) {
@@ -500,11 +573,58 @@ impl ManagerApp {
             }
         });
     }
+
+    /// Sidebar updater panel: silent, background-driven.
+    fn ui_update_panel(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        let state = self.update.lock().unwrap().clone();
+        match state {
+            UpdateState::Checking => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("检查更新…");
+                });
+            }
+            UpdateState::Current => {
+                ui.weak("已是最新版本");
+            }
+            UpdateState::Available(info) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(33, 150, 243),
+                    format!("有新版 {} 可用", info.version),
+                );
+                if ui.button(format!("安装并重启（{}）", fmt_size(info.asset_size))).clicked() {
+                    self.apply_update();
+                }
+                ui.weak(format!("当前 v{}", env!("CARGO_PKG_VERSION")));
+            }
+            UpdateState::Downloading => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.weak("正在后台下载新版本…");
+                });
+            }
+            UpdateState::Restarting => {
+                ui.weak("更新完成，正在重启应用…");
+            }
+            UpdateState::Error(msg) => {
+                ui.weak(format!("更新检查失败: {msg}"));
+                if ui.small_button("重试").clicked() {
+                    self.start_background_update_check();
+                }
+            }
+        }
+    }
 }
 
 impl eframe::App for ManagerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.handle_jobs();
+
+        if self.close_requested.load(Ordering::Relaxed) {
+            let _ = ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
 
         egui::SidePanel::left("nav").resizable(false).exact_width(170.0).show(ctx, |ui| {
             ui.add_space(8.0);
@@ -516,7 +636,9 @@ impl eframe::App for ManagerApp {
             }
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
                 ui.add_space(8.0);
-                ui.weak("v0.1.0");
+                self.ui_update_panel(ui);
+                ui.add_space(6.0);
+                ui.weak(concat!("v", env!("CARGO_PKG_VERSION")));
             });
         });
 

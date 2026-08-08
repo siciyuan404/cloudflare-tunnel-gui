@@ -4,6 +4,7 @@ mod app;
 mod cloudflared;
 mod config;
 mod tasks;
+mod updater;
 
 use app::ManagerApp;
 use eframe::egui;
