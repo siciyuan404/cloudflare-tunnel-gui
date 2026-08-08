@@ -47,23 +47,26 @@ fn run(cmd: &mut Command) -> CmdResult {
     }
 }
 
+/// Resolve symlinks / reparse points (e.g. WinGet Links shims) to the real
+/// executable. Windows services cannot reliably start from a WinGet link shim
+/// (DLL init failure 0xc0000142), so installing the service must use the real
+/// binary path.
+fn resolve_real(p: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&p).unwrap_or(p)
+}
+
 /// Locate the `cloudflared` executable.
 pub fn find_binary() -> Result<PathBuf> {
     // 1. Env override
     if let Ok(p) = std::env::var("CLOUDFLARED_PATH") {
-        let pb = PathBuf::from(&p);
+        let pb = resolve_real(PathBuf::from(&p));
         if pb.exists() {
             return Ok(pb);
         }
     }
     // 2. Shell resolution (PATH)
-    if let Ok(out) = Command::new("cloudflared").arg("--version").output() {
-        let _ = out; // just probe
-    }
     if let Some(pb) = which() {
-        if pb.exists() {
-            return Ok(pb);
-        }
+        return Ok(resolve_real(pb));
     }
     // 3. Common locations on Windows
     for cand in [
@@ -75,7 +78,7 @@ pub fn find_binary() -> Result<PathBuf> {
     .flatten()
     {
         if cand.exists() {
-            return Ok(cand);
+            return Ok(resolve_real(cand));
         }
     }
     Err(anyhow!(
