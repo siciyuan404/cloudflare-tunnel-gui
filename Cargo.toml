@@ -1,12 +1,18 @@
 [package]
 name = "cloudflare-tunnel-manager"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 description = "Desktop GUI to manage local Cloudflare Tunnel (cloudflared) service and configuration on Windows"
 
 [dependencies]
 eframe = "0.29"
 egui = "0.29"
+tray-icon = "0.19"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 dirs = "5"
@@ -14,6 +20,7 @@ anyhow = "1"
 chrono = "0.4"
 ureq = "2"
 serde_json = "1"
+encoding_rs = "0.8"
 
 [profile.release]
 opt-level = 2
